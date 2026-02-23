@@ -1,8 +1,8 @@
-'use client'; // บรรทัดที่ 1 ต้องเป็นคำสั่งนี้เท่านั้น
+'use client';
 
 import { useState, useEffect } from 'react';
 
-// --- ข้อมูลจำลองหลักสูตรตามขอบเขต 1.3.1 (ตัวอย่าง CS65) --- [cite: 960, 961]
+// ข้อมูลหลักสูตรตามขอบเขต 1.3.1
 const CURRICULUM_DATA = {
   name: "วิทยาการคอมพิวเตอร์ 2565",
   totalRequired: 126,
@@ -19,7 +19,6 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [pdfjs, setPdfjs] = useState(null);
 
-  // โหลด Library และตั้งค่า Worker ให้เสถียรที่สุด
   useEffect(() => {
     import('pdfjs-dist').then((module) => {
       module.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${module.version}/build/pdf.worker.min.mjs`;
@@ -34,46 +33,83 @@ export default function Home() {
 
   const handleFileChange = async (e) => {
     const file = e.target.files[0];
-    if (!file || !pdfjs) return;
+    if (!file) return;
+    if (!pdfjs) return alert("ระบบกำลังโหลดเครื่องมือ กรุณารอสักครู่แล้วกดใหม่ครับ");
 
     setLoading(true);
+    setResults([]);
+    
     try {
       const arrayBuffer = await file.arrayBuffer();
       const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
-      let fullText = "";
+      let allExtracted = [];
 
       for (let i = 1; i <= pdf.numPages; i++) {
         const page = await pdf.getPage(i);
         const textContent = await page.getTextContent();
-        fullText += textContent.items.map(item => item.str).join(" ") + " ";
+        
+        // 1. จัดกลุ่มข้อความตามบรรทัด (แกน Y) อนุโลมความคลาดเคลื่อน 4 pixel
+        const lines = {};
+        textContent.items.forEach(item => {
+          const y = Math.round(item.transform[5] / 4) * 4;
+          if (!lines[y]) lines[y] = [];
+          lines[y].push(item);
+        });
+
+        const sortedY = Object.keys(lines).sort((a, b) => b - a);
+        
+        sortedY.forEach(y => {
+          // 2. เรียงตัวอักษรจากซ้ายไปขวา (แกน X)
+          lines[y].sort((a, b) => a.transform[4] - b.transform[4]);
+          
+          let rawLine = "";
+          let previousRightEdge = -1;
+          
+          lines[y].forEach(item => {
+            const x = item.transform[4];
+            const width = item.width;
+            const text = item.str.replace(/\s+/g, ''); // บังคับลบช่องว่างที่แฝงมา
+            
+            if (!text) return; 
+            
+            // 3. ✨ ท่าไม้ตายคณิตศาสตร์: ถ้าพิกัดตัวอักษรห่างกันเกิน 8 pixel ค่อยเติมช่องว่าง
+            // วิธีนี้ทำให้ สระและวรรณยุกต์ภาษาไทย (ที่พิกัดซ้อนกัน) เชื่อมติดกัน 100%
+            if (previousRightEdge !== -1 && (x - previousRightEdge) > 8) {
+              rawLine += " ";
+            }
+            rawLine += text;
+            previousRightEdge = x + width;
+          });
+
+          // 4. สกัดข้อมูลด้วย Regex (กรองเฉพาะรหัสวิชาของศิลปากร)
+          const match = rawLine.match(/\b(5\d{5}|4\d{5}|SU\d{3})\b\s+(.+?)\s+(\d)\s+([A-D][+]?|[FWSU][*]?)(?=\s|$)/);
+          
+          if (match) {
+            allExtracted.push({
+              code: match[1],
+              name: match[2].trim(), // ตอนนี้ชื่อวิชาจะเรียงสวยงามแล้ว
+              credit: parseInt(match[3]),
+              grade: match[4]
+            });
+          }
+        });
       }
 
-      // Regex สกัด รหัส, ชื่อ, หน่วยกิต, เกรด (ตรงตาม Scope 1.3.2) 
-      const regex = /\b([0-9]{6}|SU[0-9]{3})\b\s+(.+?)\s+(\d)\s+([A-D][+]?|[FWSU][*]?)(?=\s|$)/g;
-      let match;
-      const extracted = [];
-      let totalPoints = 0;
-      let creditForGPAX = 0;
-      let totalPassCredits = 0;
-
-      while ((match = regex.exec(fullText)) !== null) {
-        const item = { code: match[1], name: match[2].trim(), credit: parseInt(match[3]), grade: match[4] };
-        extracted.push(item);
-
+      let totalPoints = 0, creditForGPAX = 0, totalPass = 0;
+      allExtracted.forEach(item => {
         if (!["W", "S*", "U", "S"].includes(item.grade)) {
           totalPoints += getGradeValue(item.grade) * item.credit;
           creditForGPAX += item.credit;
         }
-        if (!["F", "W", "U"].includes(item.grade)) {
-          totalPassCredits += item.credit;
-        }
-      }
+        if (!["F", "W", "U"].includes(item.grade)) totalPass += item.credit;
+      });
 
-      setResults(extracted);
+      setResults(allExtracted);
       setSummary({
         gpax: creditForGPAX > 0 ? (totalPoints / creditForGPAX).toFixed(2) : "0.00",
-        totalCredits: totalPassCredits
+        totalCredits: totalPass
       });
+
     } catch (err) {
       alert("เกิดข้อผิดพลาด: " + err.message);
     } finally {
@@ -85,45 +121,36 @@ export default function Home() {
     <main className="p-8 bg-slate-50 min-h-screen text-slate-900 font-sans">
       <div className="max-w-6xl mx-auto">
         <header className="mb-10 text-center">
-          <h1 className="text-3xl font-extrabold text-blue-900 mb-2">🎓 ระบบวิเคราะห์ข้อมูลเพื่อวางแผนการเรียน</h1>
-          <p className="text-slate-500 font-medium">กรณีศึกษา ภาควิชาคอมพิวเตอร์ มหาวิทยาลัยศิลปากร (BSCS68T2-11)</p>
+          <h1 className="text-3xl font-extrabold text-blue-900 mb-2">🎓 ระบบวิเคราะห์แผนการเรียน</h1>
+          <p className="text-slate-500 font-medium">ภาควิชาคอมพิวเตอร์ มหาวิทยาลัยศิลปากร</p>
         </header>
 
-        {/* ส่วนอัปโหลด - ตรงตามขอบเขตผู้ใช้ 1.3.3 */} [cite: 969]
-        <div className="bg-white p-8 rounded-3xl shadow-sm border border-slate-200 mb-8 text-center">
-          <input type="file" accept="application/pdf" onChange={handleFileChange} className="block w-full text-sm text-slate-500 file:mr-4 file:py-3 file:px-6 file:rounded-full file:border-0 file:text-sm file:font-bold file:bg-blue-600 file:text-white hover:file:bg-blue-700 cursor-pointer" />
-          {loading && <p className="mt-4 text-blue-600 animate-pulse font-bold">กำลังสกัดข้อมูลตามหลักสูตร...</p>}
+        <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 mb-8 text-center">
+          <input type="file" accept="application/pdf" onChange={handleFileChange} className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700 cursor-pointer" />
+          {loading && <p className="mt-4 text-blue-600 animate-pulse font-bold">กำลังเรียงพิกัดอักขระภาษาไทย...</p>}
         </div>
 
         {results.length > 0 && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-            {/* 📊 Dashboard สรุปผล - ตรงตามขอบเขต 1.3.2 ข้อ 2 & 3 */} 
             <div className="lg:col-span-1 space-y-6">
-              <div className="bg-gradient-to-br from-blue-700 to-indigo-800 text-white p-8 rounded-[2rem] shadow-xl">
-                <h3 className="text-lg font-medium opacity-80">คะแนนเฉลี่ยสะสม (GPAX)</h3>
+              <div className="bg-gradient-to-br from-blue-700 to-indigo-800 text-white p-8 rounded-3xl shadow-xl">
+                <h3 className="text-lg opacity-80">GPAX ปัจจุบัน</h3>
                 <p className="text-6xl font-black mt-2">{summary.gpax}</p>
-                <div className="mt-6 pt-6 border-t border-blue-400/30">
-                  <p className="text-sm">เกียรตินิยมอันดับ 1: <span className="font-bold">3.60 ขึ้นไป</span></p>
-                  <p className="text-sm">สถานภาพปัจจุบัน: <span className="font-bold bg-green-400/20 px-2 rounded">ปกติ</span></p>
-                </div>
               </div>
 
-              <div className="bg-white p-8 rounded-[2rem] shadow-sm border border-slate-200">
-                <h3 className="font-bold text-slate-800 mb-6 flex justify-between items-center">
-                  ความครบถ้วนของหลักสูตร
-                  <span className="text-xs font-normal text-slate-400">เป้าหมาย {CURRICULUM_DATA.totalRequired} นก.</span>
-                </h3>
+              <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
+                <h3 className="font-bold mb-4 border-b pb-2 text-sm">ความครบถ้วนของหลักสูตร</h3>
                 {CURRICULUM_DATA.categories.map((cat, idx) => {
                   const passInCat = results.filter(r => cat.courses.includes(r.code) && !["F", "W"].includes(r.grade)).reduce((a, c) => a + c.credit, 0);
                   const percent = Math.min((passInCat / cat.required) * 100, 100);
                   return (
-                    <div key={idx} className="mb-6">
-                      <div className="flex justify-between text-xs mb-2 font-bold">
-                        <span className="text-slate-600">{cat.name}</span>
-                        <span className="text-blue-700">{passInCat}/{cat.required} นก.</span>
+                    <div key={idx} className="mb-4">
+                      <div className="flex justify-between text-xs mb-1 font-bold">
+                        <span>{cat.name}</span>
+                        <span className="text-blue-600">{passInCat}/{cat.required}</span>
                       </div>
-                      <div className="w-full bg-slate-100 rounded-full h-3">
-                        <div className="bg-blue-600 h-3 rounded-full transition-all duration-1000" style={{ width: `${percent}%` }}></div>
+                      <div className="w-full bg-slate-100 rounded-full h-2">
+                        <div className="bg-blue-500 h-2 rounded-full transition-all duration-500" style={{ width: `${percent}%` }}></div>
                       </div>
                     </div>
                   );
@@ -131,28 +158,25 @@ export default function Home() {
               </div>
             </div>
 
-            {/* 📝 ตารางรายวิชาสกัดจริง - ตรงตามขอบเขต 1.3.2 ข้อ 1 */} 
-            <div className="lg:col-span-2 bg-white rounded-[2rem] shadow-sm border border-slate-200 overflow-hidden">
-              <div className="p-6 border-b border-slate-50 bg-slate-50/50">
-                <h3 className="font-bold text-lg text-slate-800">รายวิชาที่เรียนผ่านมาแล้ว ({summary.totalCredits} หน่วยกิต)</h3>
-              </div>
-              <div className="overflow-x-auto max-h-[600px]">
-                <table className="w-full text-left border-collapse">
+            <div className="lg:col-span-2 bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
+              <div className="p-4 bg-slate-50 border-b font-bold text-sm">รายวิชาที่วิเคราะห์สำเร็จ ({summary.totalCredits} หน่วยกิต)</div>
+              <div className="max-h-[500px] overflow-y-auto">
+                <table className="w-full text-left text-xs">
                   <thead className="bg-white sticky top-0 shadow-sm">
                     <tr>
-                      <th className="p-5 text-xs font-bold text-slate-400 uppercase tracking-wider">รหัสวิชา</th>
-                      <th className="p-5 text-xs font-bold text-slate-400 uppercase tracking-wider">ชื่อวิชา</th>
-                      <th className="p-5 text-xs font-bold text-slate-400 uppercase tracking-wider text-center">นก.</th>
-                      <th className="p-5 text-xs font-bold text-slate-400 uppercase tracking-wider text-center">เกรด</th>
+                      <th className="p-4 text-slate-400">รหัส</th>
+                      <th className="p-4 text-slate-400">ชื่อวิชา</th>
+                      <th className="p-4 text-center text-slate-400">นก.</th>
+                      <th className="p-4 text-center text-slate-400">เกรด</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-50">
+                  <tbody className="divide-y divide-slate-100">
                     {results.map((item, index) => (
-                      <tr key={index} className="hover:bg-blue-50/30 transition-colors">
-                        <td className="p-5 text-sm font-mono font-bold text-blue-600">{item.code}</td>
-                        <td className="p-5 text-sm text-slate-600 leading-relaxed">{item.name}</td>
-                        <td className="p-5 text-sm text-center font-medium text-slate-400">{item.credit}</td>
-                        <td className={`p-5 text-sm text-center font-black ${['F', 'W'].includes(item.grade) ? 'text-red-500' : 'text-green-600'}`}>{item.grade}</td>
+                      <tr key={index} className="hover:bg-blue-50 transition-colors">
+                        <td className="p-4 font-mono font-bold text-blue-600">{item.code}</td>
+                        <td className="p-4 font-medium text-slate-700">{item.name}</td>
+                        <td className="p-4 text-center font-bold text-slate-400">{item.credit}</td>
+                        <td className={`p-4 text-center font-black ${['F', 'W'].includes(item.grade) ? 'text-red-500' : 'text-green-600'}`}>{item.grade}</td>
                       </tr>
                     ))}
                   </tbody>
